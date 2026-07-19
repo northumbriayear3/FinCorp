@@ -1,0 +1,20 @@
+horizon,task,model,feature_set,predicted_level,forecast_date,target_date,model_path,threshold,predicted_movement,confidence_pct
+1,level,Linear Regression,All gold level features,4157.202138445355,2026-07-03,2026-07-06,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_LEVEL_t1_Linear_Regression.pkl,,,
+2,level,Linear Regression,Technical + trend,4108.846190083128,2026-07-03,2026-07-07,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_LEVEL_t2_Linear_Regression.pkl,,,
+3,level,Linear Regression,Technical + trend,4094.2131082950414,2026-07-03,2026-07-08,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_LEVEL_t3_Linear_Regression.pkl,,,
+5,level,Linear Regression,Technical + trend,4072.2191433366643,2026-07-03,2026-07-10,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_LEVEL_t5_Linear_Regression.pkl,,,
+10,level,Linear Regression,Technical + trend,3998.8252403238266,2026-07-03,2026-07-17,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_LEVEL_t10_Linear_Regression.pkl,,,
+20,level,Linear Regression,Technical + trend,3726.085876607134,2026-07-03,2026-07-31,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_LEVEL_t20_Linear_Regression.pkl,,,
+30,level,Linear Regression,Technical + trend,3542.143063899992,2026-07-03,2026-08-14,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_LEVEL_t30_Linear_Regression.pkl,,,
+40,level,Ridge,Technical + trend,3997.197337991192,2026-07-03,2026-08-28,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_LEVEL_t40_Ridge.pkl,,,
+60,level,Ridge,Technical + trend,4253.6674749544,2026-07-03,2026-09-25,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_LEVEL_t60_Ridge.pkl,,,
+1,movement,Random Forest,All candidate features,,2026-07-06,2026-07-07,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_MOVEMENT_t1_Random_Forest.pkl,0.44,Up,49.58130135485873
+2,movement,XGBoost,Top 40 MI features,,2026-07-06,2026-07-08,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_MOVEMENT_t2_XGBoost.pkl,0.39,Up,57.66078233718872
+3,movement,XGBoost,All candidate features,,2026-07-06,2026-07-09,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_MOVEMENT_t3_XGBoost.pkl,0.22,Up,54.122233390808105
+5,movement,Gradient Boosting,All candidate features,,2026-07-06,2026-07-13,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_MOVEMENT_t5_Gradient_Boosting.pkl,0.1,Up,28.61831411772831
+10,movement,XGBoost,Top 10 MI features,,2026-07-06,2026-07-20,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_MOVEMENT_t10_XGBoost.pkl,0.11,Up,17.414847016334534
+15,movement,Gradient Boosting,Top 60 MI features,,2026-07-06,2026-07-27,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_MOVEMENT_t15_Gradient_Boosting.pkl,0.12,Up,48.41146961091573
+20,movement,Logistic Regression,Top 40 MI features,,2026-07-06,2026-08-03,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_MOVEMENT_t20_Logistic_Regression.pkl,0.1,Up,41.787057556898446
+30,movement,Gradient Boosting,Top 10 MI features,,2026-07-06,2026-08-17,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_MOVEMENT_t30_Gradient_Boosting.pkl,0.11,Up,79.34136478000474
+40,movement,Logistic Regression,Top 20 MI features,,2026-07-06,2026-08-31,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_MOVEMENT_t40_Logistic_Regression.pkl,0.17,Up,90.45103767495284
+60,movement,LightGBM,Top 10 MI features,,2026-07-06,2026-09-28,/content/drive/MyDrive/final_platform_actual_dissertation_models/GOLD/GOLD_MOVEMENT_t60_LightGBM.pkl,0.46,Up,98.63100393669126
