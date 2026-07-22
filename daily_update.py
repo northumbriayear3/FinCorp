@@ -28,7 +28,6 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import requests
-import yfinance as yf
 import joblib
 from pandas.tseries.offsets import BDay
 
@@ -38,9 +37,12 @@ ROOT = Path(__file__).resolve().parent
 MODEL_ROOT = ROOT / "final_platform_actual_dissertation_models"
 FORECAST_API_URL = (os.getenv("PLATFORM_FORECAST_API_URL") or "http://commodity.fin-corp.uk/api/ingest_forecast.php").strip()
 API_KEY = os.getenv("PLATFORM_API_KEY", "").strip()
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "").strip()
 
 if not API_KEY:
     raise RuntimeError("Missing PLATFORM_API_KEY GitHub secret.")
+if not ALPHA_VANTAGE_API_KEY:
+    raise RuntimeError("Missing ALPHAVANTAGE_API_KEY GitHub secret.")
 
 # We keep the same platform design used in the dissertation demo.
 # GOLD: level horizons only, because Gold level has no t+15.
@@ -124,28 +126,174 @@ def flatten_yfinance(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_index()
 
 
-def download_yahoo(prefix: str, start: str = "2014-01-01") -> pd.DataFrame:
-    ticker = YAHOO_TICKERS[prefix]
-    log(f"Downloading Yahoo data: {prefix} = {ticker}")
-    df = yf.download(ticker, start=start, auto_adjust=False, progress=False, threads=False)
-    if df is None or len(df) == 0:
-        raise RuntimeError(f"No Yahoo data downloaded for {prefix} ({ticker})")
-    df = flatten_yfinance(df)
+ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
 
-    rename = {
-        "Open": f"{prefix}_open",
-        "High": f"{prefix}_high",
-        "Low": f"{prefix}_low",
-        "Close": f"{prefix}_close",
-        "Adj Close": f"{prefix}_adj_close",
-        "Volume": f"{prefix}_volume",
-    }
+ALPHA_COMMODITY_FUNCTIONS = {
+    "gold": ("GOLD_SILVER_HISTORY", "GOLD"),
+    "silver": ("GOLD_SILVER_HISTORY", "SILVER"),
+    "wti": ("WTI", None),
+    "brent": ("BRENT", None),
+    "natural_gas": ("NATURAL_GAS", None),
+    "ng": ("NATURAL_GAS", None),
+}
+
+ALPHA_EQUITY_SYMBOLS = {
+    "xle": "XLE",
+    "ung": "UNG",
+}
+
+ALPHA_FX_PAIRS = {
+    "eurusd": ("EUR", "USD"),
+    "gbpusd": ("GBP", "USD"),
+}
+
+FRED_PREFIX_SERIES = {
+    "sp500": "SP500",
+    "vix": "VIXCLS",
+    "tnx": "DGS10",
+    "dxy": "DTWEXBGS",
+}
+
+_ALPHA_CACHE: dict[str, pd.DataFrame] = {}
+
+
+def make_ohlcv_from_close(prefix: str, close: pd.Series) -> pd.DataFrame:
+    close = pd.to_numeric(close, errors="coerce").dropna().sort_index()
+    close.index = pd.to_datetime(close.index)
+    out = pd.DataFrame(index=close.index)
+    out[f"{prefix}_open"] = close
+    out[f"{prefix}_high"] = close
+    out[f"{prefix}_low"] = close
+    out[f"{prefix}_close"] = close
+    out[f"{prefix}_adj_close"] = close
+    out[f"{prefix}_volume"] = 0.0
+    out.index.name = "date"
+    return out
+
+
+def alpha_get(params: dict) -> dict:
+    params = dict(params)
+    params["apikey"] = ALPHA_VANTAGE_API_KEY
+    response = requests.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=60)
+    response.raise_for_status()
+    data = response.json()
+    if "Error Message" in data:
+        raise RuntimeError(data["Error Message"])
+    if "Note" in data:
+        raise RuntimeError(data["Note"])
+    if "Information" in data:
+        raise RuntimeError(data["Information"])
+    return data
+
+
+def parse_alpha_commodity_data(data: dict) -> pd.Series:
+    rows = data.get("data", [])
+    if not rows:
+        raise RuntimeError(f"No commodity rows returned from Alpha Vantage. Keys: {list(data.keys())[:8]}")
+    dates = []
+    values = []
+    for row in rows:
+        date_value = row.get("date") or row.get("timestamp")
+        price_value = row.get("value") or row.get("price")
+        if date_value is None or price_value in (None, "."):
+            continue
+        dates.append(pd.to_datetime(date_value))
+        values.append(pd.to_numeric(price_value, errors="coerce"))
+    s = pd.Series(values, index=pd.to_datetime(dates)).dropna().sort_index()
+    if s.empty:
+        raise RuntimeError("Alpha Vantage commodity series was empty after parsing.")
+    return s
+
+
+def parse_alpha_daily_ohlcv(data: dict) -> pd.DataFrame:
+    ts_key = None
+    for key in data.keys():
+        if "Time Series" in key:
+            ts_key = key
+            break
+    if ts_key is None:
+        raise RuntimeError(f"No Time Series block returned. Keys: {list(data.keys())[:8]}")
+    rows = []
+    for date_value, values in data[ts_key].items():
+        rows.append({
+            "date": pd.to_datetime(date_value),
+            "Open": pd.to_numeric(values.get("1. open"), errors="coerce"),
+            "High": pd.to_numeric(values.get("2. high"), errors="coerce"),
+            "Low": pd.to_numeric(values.get("3. low"), errors="coerce"),
+            "Close": pd.to_numeric(values.get("4. close"), errors="coerce"),
+            "Volume": pd.to_numeric(values.get("5. volume", 0), errors="coerce"),
+        })
+    df = pd.DataFrame(rows).dropna(subset=["date", "Close"]).set_index("date").sort_index()
+    if df.empty:
+        raise RuntimeError("Alpha Vantage daily series was empty after parsing.")
+    return df
+
+
+def download_fred_prefix(prefix: str, series_id: str) -> pd.DataFrame:
+    log(f"Downloading FRED fallback data: {prefix} = {series_id}")
+    s = download_fred_series(series_id)
+    return make_ohlcv_from_close(prefix, s)
+
+
+def download_alpha_commodity(prefix: str) -> pd.DataFrame:
+    function_name, symbol = ALPHA_COMMODITY_FUNCTIONS[prefix]
+    log(f"Downloading Alpha Vantage commodity data: {prefix} = {function_name}")
+    params = {"function": function_name, "interval": "daily"}
+    if symbol is not None:
+        params["symbol"] = symbol
+    data = alpha_get(params)
+    s = parse_alpha_commodity_data(data)
+    return make_ohlcv_from_close(prefix, s)
+
+
+def download_alpha_equity(prefix: str, symbol: str) -> pd.DataFrame:
+    log(f"Downloading Alpha Vantage daily equity/ETF data: {prefix} = {symbol}")
+    data = alpha_get({"function": "TIME_SERIES_DAILY", "symbol": symbol, "outputsize": "full"})
+    df = parse_alpha_daily_ohlcv(data)
     out = pd.DataFrame(index=df.index)
-    for old, new in rename.items():
-        if old in df.columns:
-            out[new] = pd.to_numeric(df[old], errors="coerce")
-    if f"{prefix}_adj_close" not in out.columns and f"{prefix}_close" in out.columns:
-        out[f"{prefix}_adj_close"] = out[f"{prefix}_close"]
+    out[f"{prefix}_open"] = df["Open"]
+    out[f"{prefix}_high"] = df["High"]
+    out[f"{prefix}_low"] = df["Low"]
+    out[f"{prefix}_close"] = df["Close"]
+    out[f"{prefix}_adj_close"] = df["Close"]
+    out[f"{prefix}_volume"] = df.get("Volume", 0.0)
+    out.index.name = "date"
+    return out
+
+
+def download_alpha_fx(prefix: str, from_symbol: str, to_symbol: str) -> pd.DataFrame:
+    log(f"Downloading Alpha Vantage daily FX data: {prefix} = {from_symbol}/{to_symbol}")
+    data = alpha_get({"function": "FX_DAILY", "from_symbol": from_symbol, "to_symbol": to_symbol, "outputsize": "full"})
+    df = parse_alpha_daily_ohlcv(data)
+    return make_ohlcv_from_close(prefix, df["Close"])
+
+
+def download_yahoo(prefix: str, start: str = "2014-01-01") -> pd.DataFrame:
+    """
+    The original script used yfinance/Yahoo. This keeps the old function name
+    so the rest of the script does not need to change, but it now uses
+    Alpha Vantage/FRED instead of Yahoo to avoid GitHub Actions rate limits.
+    """
+    if prefix in _ALPHA_CACHE:
+        return _ALPHA_CACHE[prefix].copy()
+    if prefix in ALPHA_COMMODITY_FUNCTIONS:
+        out = download_alpha_commodity(prefix)
+    elif prefix in ALPHA_EQUITY_SYMBOLS:
+        out = download_alpha_equity(prefix, ALPHA_EQUITY_SYMBOLS[prefix])
+    elif prefix in ALPHA_FX_PAIRS:
+        from_symbol, to_symbol = ALPHA_FX_PAIRS[prefix]
+        out = download_alpha_fx(prefix, from_symbol, to_symbol)
+    elif prefix in FRED_PREFIX_SERIES:
+        out = download_fred_prefix(prefix, FRED_PREFIX_SERIES[prefix])
+    elif prefix in ["heating_oil", "gasoline"]:
+        log(f"WARNING: no Alpha Vantage replacement configured for {prefix}; skipping this series")
+        raise RuntimeError(f"No replacement data source configured for {prefix}")
+    else:
+        raise RuntimeError(f"No Alpha Vantage/FRED replacement configured for prefix: {prefix}")
+    out = out.loc[out.index >= pd.Timestamp(start)]
+    if out.empty:
+        raise RuntimeError(f"No replacement market data returned for {prefix}")
+    _ALPHA_CACHE[prefix] = out.copy()
     return out
 
 
