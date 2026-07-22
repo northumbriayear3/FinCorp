@@ -3,13 +3,18 @@ name: Daily Commodity Forecast Update
 on:
   workflow_dispatch:
   schedule:
-    # Runs daily at 08:00 UTC. In summer UK time this is 09:00 BST.
+    # Runs daily at 08:00 UTC. In UK summer time this is 09:00 BST.
     - cron: "0 8 * * *"
 
 jobs:
   update-platform:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+
+    env:
+      PLATFORM_API_KEY: ${{ secrets.PLATFORM_API_KEY }}
+      PLATFORM_FORECAST_API_URL: ${{ secrets.PLATFORM_FORECAST_API_URL }}
+      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
 
     steps:
       - name: Checkout repository
@@ -25,7 +30,4 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run daily forecast updater
-        env:
-          PLATFORM_API_KEY: ${{ secrets.PLATFORM_API_KEY }}
-          PLATFORM_FORECAST_API_URL: ${{ secrets.PLATFORM_FORECAST_API_URL }}
         run: python daily_update.py
