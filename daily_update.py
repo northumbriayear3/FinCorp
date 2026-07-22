@@ -36,7 +36,7 @@ warnings.filterwarnings("ignore")
 
 ROOT = Path(__file__).resolve().parent
 MODEL_ROOT = ROOT / "final_platform_actual_dissertation_models"
-FORECAST_API_URL = os.getenv("PLATFORM_FORECAST_API_URL", "http://commodity.fin-corp.uk/api/ingest_forecast.php")
+FORECAST_API_URL = (os.getenv("PLATFORM_FORECAST_API_URL") or "http://commodity.fin-corp.uk/api/ingest_forecast.php").strip()
 API_KEY = os.getenv("PLATFORM_API_KEY", "").strip()
 
 if not API_KEY:
