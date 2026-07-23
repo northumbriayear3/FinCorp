@@ -7,7 +7,7 @@ from public market data, predicts the latest level/movement outputs, and posts t
 combined forecast rows to the PHP/MySQL platform.
 
 Required GitHub secrets:
-- PLATFORM_API_KEY: your ingest API key from config.php
+- PLATFORM_API_KEY: the ingest API key under config.php
 Optional GitHub secret:
 - PLATFORM_FORECAST_API_URL: defaults to http://commodity.fin-corp.uk/api/ingest_forecast.php
 """
