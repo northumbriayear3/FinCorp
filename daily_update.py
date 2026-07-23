@@ -1,8 +1,7 @@
 
 """
 Daily Commodity Forecast Update
---------------------------------
-This script loads the saved dissertation models, rebuilds the latest no-news features
+This script loads the .pkl files, rebuilds the latest features
 from public market data, predicts the latest level/movement outputs, and posts the
 combined forecast rows to the PHP/MySQL platform.
 
