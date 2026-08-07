@@ -1,0 +1,37 @@
+name: Daily Commodity Forecast Update
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * *"
+
+jobs:
+  update-platform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      PLATFORM_API_KEY: ${{ secrets.PLATFORM_API_KEY }}
+      PLATFORM_FORECAST_API_URL: ${{ secrets.PLATFORM_FORECAST_API_URL }}
+      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Verify real Crude stable row fix V12 is deployed
+        run: |
+          grep -n "REAL_CRUDE_STABLE_ROW_FIX_V12_LATEST_VALID_ROW_2026_07_30" daily_update.py
+          echo "Crude V12 verification passed"
+
+      - name: Run daily forecast updater
+        run: python daily_update.py
