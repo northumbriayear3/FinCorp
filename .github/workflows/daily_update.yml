@@ -28,10 +28,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Verify Crude training-compatible V13 is deployed
-        run: |
-          grep -n "REAL_CRUDE_TRAINING_COMPATIBLE_YFINANCE_V13_2026_08_29" daily_update.py
-          echo "Crude V13 training-compatible verification passed"
 
       - name: Run daily forecast updater
         run: python daily_update.py
