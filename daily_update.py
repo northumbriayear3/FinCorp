@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import re
-import sysa
+import sys
 import math
 import glob
 import json
