@@ -58,7 +58,7 @@ except Exception:
 
 warnings.filterwarnings("ignore")
 
-REAL_GOLD_FIX_VERSION = "REAL_CRUDE_TRAINING_COMPATIBLE_YFINANCE_V13_2026_08_29"
+REAL_GOLD_FIX_VERSION = "REAL_CRUDE_SAFE_PER_HORIZON_GOLD_MOVEMENT_FEATURE_FIX_V14_2026_08_30"
 
 ROOT = Path(__file__).resolve().parent
 MODEL_ROOT = ROOT / "final_platform_actual_dissertation_models"
@@ -415,6 +415,15 @@ def add_prefixed_features(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
     df[f"{prefix}_ret_0"] = c.pct_change()
     df[f"{prefix}_adj_ret_0"] = a.pct_change()
 
+    # V14: exact Zhang-style naming used by the saved Gold movement models.
+    # The training notebook created returns from each raw price column, therefore
+    # names such as gold_close_ret_0, silver_close_ret_0, wti_close_ret_0, etc.
+    # Earlier updater versions created gold_ret_0 instead, causing those required
+    # features to be zero-filled during live inference.
+    df[f"{prefix}_close_ret_0"] = c.pct_change()
+    if adj in df.columns:
+        df[f"{prefix}_adj_close_ret_0"] = a.pct_change()
+
     # Crude level notebook naming expected by saved level models.
     df[f"{prefix}_return_1d"] = df[f"{prefix}_ret_0"]
     df[f"{prefix}_adj_return_1d"] = df[f"{prefix}_adj_ret_0"]
@@ -426,6 +435,11 @@ def add_prefixed_features(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
     for lag in all_lags:
         df[f"{prefix}_ret_0_lag_{lag}"] = df[f"{prefix}_ret_0"].shift(lag)
         df[f"{prefix}_adj_ret_0_lag_{lag}"] = df[f"{prefix}_adj_ret_0"].shift(lag)
+
+        # V14 exact aliases for movement bundles exported from the Zhang-style notebook.
+        df[f"{prefix}_close_ret_0_lag_{lag}"] = df[f"{prefix}_close_ret_0"].shift(lag)
+        if f"{prefix}_adj_close_ret_0" in df.columns:
+            df[f"{prefix}_adj_close_ret_0_lag_{lag}"] = df[f"{prefix}_adj_close_ret_0"].shift(lag)
 
     for lag in model_lags:
         df[f"{prefix}_close_lag_{lag}"] = c.shift(lag)
@@ -1070,94 +1084,113 @@ def valid_crude_level_prediction(pred: float, reference_price: float | None) -> 
     return True
 
 
-def select_stable_crude_level_predictions(feature_df: pd.DataFrame, model_items: list[dict]) -> tuple[dict[int, tuple[float, str, dict]], str]:
+def select_stable_crude_level_predictions(
+    feature_df: pd.DataFrame,
+    model_items: list[dict],
+    max_recent_rows: int = 5,
+) -> tuple[dict[int, tuple[float, str, dict]], str]:
     """
-    Select the most recent Crude feature row that gives coherent level predictions
-    for every Crude level horizon. This avoids posting a partially broken live row
-    when one external source updates later than another or returns partial data.
+    V14 safe Crude level selection.
 
-    This is not a manual replacement: every value is still produced by the saved
-    dissertation model, using a real complete feature row.
+    Why this changed:
+    V13 required *every* Crude horizon to produce a plausible value on the
+    same feature row. One bad horizon (especially t+5) therefore crashed the
+    entire GitHub Actions job and prevented Gold/Natural Gas from updating.
+
+    V14:
+    - checks only the latest few genuine Brent trading rows;
+    - evaluates each horizon independently;
+    - never fabricates/rescales a model output;
+    - returns only predictions that pass the plausibility validation;
+    - logs and skips a horizon if its saved model does not produce a usable
+      current prediction.
+
+    This is preferable to searching months backwards for a row simply because
+    it gives a convenient-looking value.
     """
     df = feature_df.copy().replace([np.inf, -np.inf], np.nan).sort_index()
     if df.empty:
         raise RuntimeError("Crude feature frame is empty.")
 
-    candidate_dates = list(df.index.unique())[-90:]
-    candidate_dates = sorted(candidate_dates, reverse=True)
+    candidate_dates = sorted(list(df.index.unique())[-max_recent_rows:], reverse=True)
+    if not candidate_dates:
+        raise RuntimeError("Crude feature frame contains no candidate dates.")
 
-    latest_dt = candidate_dates[0] if candidate_dates else None
-    if latest_dt is not None:
-        latest_ref = latest_numeric_at_or_before(df, "brent_close", latest_dt)
-        log(
-            f"Testing {len(candidate_dates)} recent Brent trading rows for "
-            f"Crude level stability; newest={latest_dt.date()}, "
-            f"reference Brent={latest_ref}"
-        )
+    newest_dt = candidate_dates[0]
+    newest_ref = latest_numeric_at_or_before(df, "brent_close", newest_dt)
+    log(
+        f"Testing up to {len(candidate_dates)} latest Brent rows independently "
+        f"for each Crude level horizon; newest={newest_dt.date()}, "
+        f"reference Brent={newest_ref}"
+    )
+
+    selected: dict[int, tuple[float, str, dict]] = {}
 
     for item in model_items:
-        missing_cols = [f for f in item["features"] if f not in df.columns]
+        h = int(item["horizon"])
+        features = item["features"]
+        model = item["model"]
+        info = item["info"]
+
+        missing_cols = [f for f in features if f not in df.columns]
         log(
-            f"Crude level t+{int(item['horizon'])}: "
-            f"required_features={len(item['features'])}, "
+            f"Crude level t+{h}: required_features={len(features)}, "
             f"missing_columns={len(missing_cols)}"
         )
         if missing_cols:
             log(
-                f"Crude level t+{int(item['horizon'])} first missing columns: "
-                f"{missing_cols[:10]}"
+                f"WARNING: CRUDE level t+{h} cannot run because required "
+                f"columns are missing: {missing_cols[:10]}"
             )
+            continue
 
-    last_failure = None
+        last_reason = "no complete candidate row"
 
-    for dt in candidate_dates:
-        reference_price = latest_numeric_at_or_before(df, "brent_close", dt)
-        if reference_price is None:
-            reference_price = latest_numeric_at_or_before(df, "wti_close", dt)
-
-        candidate_predictions: dict[int, tuple[float, str, dict]] = {}
-        candidate_ok = True
-        failure_reasons = []
-
-        for item in model_items:
-            h = int(item["horizon"])
-            features = item["features"]
-            model = item["model"]
-            info = item["info"]
-
-            missing = [f for f in features if f not in df.columns]
-            if missing:
-                candidate_ok = False
-                failure_reasons.append(f"t+{h} missing {len(missing)} features")
-                break
+        for dt in candidate_dates:
+            reference_price = latest_numeric_at_or_before(df, "brent_close", dt)
+            if reference_price is None:
+                reference_price = latest_numeric_at_or_before(df, "wti_close", dt)
 
             row_df = df.loc[[dt], features].replace([np.inf, -np.inf], np.nan)
             if row_df.isna().any(axis=None):
-                candidate_ok = False
-                failure_reasons.append(f"t+{h} has NA features")
-                break
+                last_reason = f"NA features at {dt.date()}"
+                continue
 
             pred = float(model.predict(row_df)[0])
+
             if not valid_crude_level_prediction(pred, reference_price):
-                candidate_ok = False
-                failure_reasons.append(f"t+{h} invalid prediction {pred:.4f} at {dt.date()}")
-                break
+                ratio_txt = ""
+                if reference_price is not None and np.isfinite(reference_price) and reference_price > 0:
+                    ratio_txt = f", ratio={pred / float(reference_price):.4f}"
+                last_reason = (
+                    f"invalid model prediction {pred:.4f} at {dt.date()}"
+                    f" (reference={reference_price}{ratio_txt})"
+                )
+                continue
 
-            candidate_predictions[h] = (round(pred, 4), dt.date().isoformat(), info)
+            selected[h] = (round(pred, 4), dt.date().isoformat(), info)
+            log(
+                f"Crude level t+{h} valid live prediction selected: "
+                f"{pred:.4f} using feature date {dt.date()} "
+                f"(reference Brent={reference_price})"
+            )
+            break
 
-        if candidate_ok and len(candidate_predictions) == len(model_items):
-            log(f"Crude stable level feature row selected: {dt.date()} with reference price {reference_price}")
-            for h, (pred, _, _) in sorted(candidate_predictions.items()):
-                log(f"Crude level t+{h} stable-row prediction OK: {pred:.4f}")
-            return candidate_predictions, dt.date().isoformat()
+        if h not in selected:
+            log(
+                f"WARNING: CRUDE level t+{h} skipped: no valid prediction in "
+                f"the latest {len(candidate_dates)} Brent rows. Last reason: {last_reason}"
+            )
 
-        if failure_reasons:
-            last_failure = "; ".join(failure_reasons)
+    if not selected:
+        raise RuntimeError(
+            "None of the Crude level models produced a valid prediction on the "
+            "latest genuine Brent feature rows."
+        )
 
-    raise RuntimeError(
-        "No stable Crude level feature row found in the last 90 rows. "
-        f"Last failure: {last_failure}"
-    )
+    # Return newest available feature date for logging/backward compatibility.
+    newest_selected_date = max(pd.Timestamp(v[1]) for v in selected.values()).date().isoformat()
+    return selected, newest_selected_date
 
 
 def build_predictions_for_commodity(commodity: str) -> dict[int, dict]:
@@ -1339,8 +1372,27 @@ def main() -> None:
                     f"FINAL BLOCK: invalid Crude level value {crude_value} for t+{payload.get('horizon_days')}. Not posted."
                 )
 
-    log(f"Posting {len(all_payloads)} forecast rows to platform")
+    postable_payloads = []
     for payload in all_payloads:
+        # V14: CRUDE is configured around level horizons. If a Crude level
+        # model was rejected by validation, leave the existing SQL value
+        # untouched instead of overwriting it with a blank/invalid prediction.
+        if (
+            payload.get("commodity_code") == "CRUDE"
+            and payload.get("predicted_level") in ("", None)
+        ):
+            log(
+                f"SKIP POST CRUDE t+{payload.get('horizon_days')}: "
+                "no validated current level prediction."
+            )
+            continue
+        postable_payloads.append(payload)
+
+    log(
+        f"Posting {len(postable_payloads)} validated forecast rows to platform "
+        f"(from {len(all_payloads)} prepared rows)"
+    )
+    for payload in postable_payloads:
         post_forecast(payload)
 
     log("Daily commodity platform update complete")
