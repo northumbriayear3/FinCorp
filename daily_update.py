@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import re
-import sys
+import sysa
 import math
 import glob
 import json
@@ -58,7 +58,7 @@ except Exception:
 
 warnings.filterwarnings("ignore")
 
-REAL_GOLD_FIX_VERSION = "REAL_CRUDE_STABLE_ROW_FIX_V12_LATEST_VALID_ROW_2026_07_30"
+REAL_GOLD_FIX_VERSION = "REAL_CRUDE_TRAINING_COMPATIBLE_YFINANCE_V13_2026_08_29"
 
 ROOT = Path(__file__).resolve().parent
 MODEL_ROOT = ROOT / "final_platform_actual_dissertation_models"
@@ -687,7 +687,205 @@ def build_gold_movement_frame() -> pd.DataFrame:
     return df
 
 
-def build_crude_frame() -> pd.DataFrame:
+
+CRUDE_LEVEL_TRAINING_TICKERS = {
+    "brent": "BZ=F",
+    "wti": "CL=F",
+    "heating_oil": "HO=F",
+    "gasoline": "RB=F",
+    "natural_gas": "NG=F",
+    "xle": "XLE",
+    "sp500": "^GSPC",
+    "vix": "^VIX",
+    "dxy": "DX-Y.NYB",
+    "tnx": "^TNX",
+    "eurusd": "EURUSD=X",
+    "gbpusd": "GBPUSD=X",
+}
+
+
+def download_crude_level_yfinance_series(
+    prefix: str,
+    ticker: str,
+    start: str = "2007-01-01",
+    attempts: int = 3,
+) -> pd.DataFrame:
+    """
+    Download one Crude level input exactly from the Yahoo/yfinance source family
+    used by the original Crude level training notebook.
+
+    Important:
+    - auto_adjust=False
+    - full OHLCV where Yahoo provides it
+    - no Alpha Vantage/FRED synthetic OHLCV substitution
+    """
+    if yf is None:
+        raise RuntimeError("yfinance is required for the Crude level pipeline")
+
+    last_exc = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            log(
+                f"Downloading training-compatible Crude level data "
+                f"{prefix}: {ticker} (attempt {attempt}/{attempts})"
+            )
+            raw = yf.download(
+                ticker,
+                start=start,
+                progress=False,
+                auto_adjust=False,
+                threads=False,
+            )
+
+            if raw is None or raw.empty:
+                raise RuntimeError(f"yfinance returned no rows for {prefix} ({ticker})")
+
+            raw = flatten_yfinance(raw)
+
+            required = ["Open", "High", "Low", "Close", "Volume"]
+            missing = [c for c in required if c not in raw.columns]
+            if missing:
+                raise RuntimeError(
+                    f"yfinance {prefix} ({ticker}) is missing required columns: {missing}"
+                )
+
+            out = pd.DataFrame(index=pd.to_datetime(raw.index))
+            out[f"{prefix}_open"] = pd.to_numeric(raw["Open"], errors="coerce")
+            out[f"{prefix}_high"] = pd.to_numeric(raw["High"], errors="coerce")
+            out[f"{prefix}_low"] = pd.to_numeric(raw["Low"], errors="coerce")
+            out[f"{prefix}_close"] = pd.to_numeric(raw["Close"], errors="coerce")
+
+            if "Adj Close" in raw.columns:
+                out[f"{prefix}_adj_close"] = pd.to_numeric(
+                    raw["Adj Close"], errors="coerce"
+                )
+
+            out[f"{prefix}_volume"] = pd.to_numeric(
+                raw["Volume"], errors="coerce"
+            )
+
+            out = (
+                out.replace([np.inf, -np.inf], np.nan)
+                .dropna(subset=[f"{prefix}_close"])
+                .sort_index()
+            )
+            out = out[~out.index.duplicated(keep="last")]
+            out.index.name = "date"
+
+            if out.empty:
+                raise RuntimeError(
+                    f"No usable training-compatible rows remained for {prefix} ({ticker})"
+                )
+
+            log(
+                f"Crude level {prefix}: {len(out)} rows, "
+                f"{out.index.min().date()} to {out.index.max().date()}"
+            )
+            return out
+
+        except Exception as exc:
+            last_exc = exc
+            log(
+                f"WARNING: Crude level yfinance attempt {attempt} failed "
+                f"for {prefix}/{ticker}: {exc}"
+            )
+            if attempt < attempts:
+                time.sleep(3 * attempt)
+
+    raise RuntimeError(
+        f"Could not download Crude level source {prefix}/{ticker} after "
+        f"{attempts} attempts: {last_exc}"
+    )
+
+
+def build_crude_level_frame() -> pd.DataFrame:
+    """
+    Rebuild the live Crude LEVEL inputs using the same source/alignment contract
+    as the original Crude level training notebook:
+
+    1. All 12 market inputs come from Yahoo/yfinance.
+    2. Brent BZ=F trading dates are the master index.
+    3. Other markets are LEFT-joined onto Brent dates.
+    4. Only non-Brent source columns are forward-filled, with limit=5.
+    5. Saved model feature names are reconstructed afterwards.
+
+    This intentionally does NOT reuse the mixed Alpha/FRED pipeline used by
+    movement models, because that substitution changed OHLCV semantics and
+    produced economically implausible Crude level outputs.
+    """
+    downloaded: dict[str, pd.DataFrame] = {}
+
+    for prefix, ticker in CRUDE_LEVEL_TRAINING_TICKERS.items():
+        downloaded[prefix] = download_crude_level_yfinance_series(
+            prefix=prefix,
+            ticker=ticker,
+            start="2007-01-01",
+        )
+
+    if "brent" not in downloaded or downloaded["brent"].empty:
+        raise RuntimeError("Brent BZ=F data is unavailable for Crude level inference")
+
+    # Match the original training notebook: Brent master dates and only
+    # Brent OHLCV in the target frame (no Brent adjusted-close column).
+    brent = downloaded["brent"]
+    required_brent = [
+        "brent_open",
+        "brent_high",
+        "brent_low",
+        "brent_close",
+        "brent_volume",
+    ]
+    missing_brent = [c for c in required_brent if c not in brent.columns]
+    if missing_brent:
+        raise RuntimeError(
+            f"Training-compatible Brent frame is missing: {missing_brent}"
+        )
+
+    df = brent[required_brent].copy()
+
+    # Match the original notebook's left merge onto Brent trading dates.
+    for prefix in CRUDE_LEVEL_TRAINING_TICKERS:
+        if prefix == "brent":
+            continue
+        frame = downloaded[prefix]
+        df = df.join(frame, how="left")
+
+    # Match the original notebook: short-gap fill only for non-target markets.
+    non_target_cols = [c for c in df.columns if not c.startswith("brent_")]
+    df[non_target_cols] = df[non_target_cols].ffill(limit=5)
+
+    df = df.replace([np.inf, -np.inf], np.nan).sort_index()
+    df.index.name = "date"
+
+    prefixes = list(CRUDE_LEVEL_TRAINING_TICKERS.keys())
+    for prefix in prefixes:
+        df = add_prefixed_features(df, prefix)
+
+    # Same cross-market ratio family used in the Crude level experiment.
+    df = add_ratio_features(
+        df,
+        "brent",
+        ["wti", "heating_oil", "gasoline", "natural_gas", "xle", "sp500"],
+    )
+
+    latest_brent = pd.to_numeric(
+        df["brent_close"], errors="coerce"
+    ).dropna()
+
+    if latest_brent.empty:
+        raise RuntimeError("Crude level frame contains no usable Brent close values")
+
+    log(
+        f"Training-compatible Crude level frame ready: {len(df)} rows, "
+        f"latest Brent date={latest_brent.index[-1].date()}, "
+        f"latest Brent close={float(latest_brent.iloc[-1]):.4f}"
+    )
+
+    return df
+
+
+def build_crude_movement_frame() -> pd.DataFrame:
     prefixes = ["brent", "wti", "heating_oil", "gasoline", "natural_gas", "xle", "sp500", "vix", "dxy", "tnx", "eurusd", "gbpusd"]
     df = merge_prefixes(prefixes, start="2014-01-01")
     for p in prefixes:
@@ -823,8 +1021,10 @@ def current_features_for(commodity: str, task: str) -> pd.DataFrame:
         return build_gold_level_frame()
     if commodity == "GOLD" and task == "movement":
         return build_gold_movement_frame()
-    if commodity == "CRUDE":
-        return build_crude_frame()
+    if commodity == "CRUDE" and task == "level":
+        return build_crude_level_frame()
+    if commodity == "CRUDE" and task == "movement":
+        return build_crude_movement_frame()
     if commodity == "NATGAS" and task == "level":
         return build_natgas_level_frame()
     if commodity == "NATGAS" and task == "movement":
@@ -841,7 +1041,7 @@ def unit_source_text(commodity: str) -> str:
     if commodity == "GOLD":
         return "REAL_GOLD_LEVEL_FEATURE_FIX_V8 from saved Gold no-news dissertation models"
     if commodity == "CRUDE":
-        return "REAL_CRUDE_STABLE_ROW_FIX_V12 from saved Crude Oil no-news dissertation models"
+        return "REAL_CRUDE_TRAINING_COMPATIBLE_YFINANCE_V13 from saved Crude Oil no-news dissertation models"
     if commodity == "NATGAS":
         return "Daily GitHub Actions update from saved Natural Gas no-news dissertation models"
     return "Daily GitHub Actions update from saved no-news dissertation models"
@@ -885,6 +1085,28 @@ def select_stable_crude_level_predictions(feature_df: pd.DataFrame, model_items:
 
     candidate_dates = list(df.index.unique())[-90:]
     candidate_dates = sorted(candidate_dates, reverse=True)
+
+    latest_dt = candidate_dates[0] if candidate_dates else None
+    if latest_dt is not None:
+        latest_ref = latest_numeric_at_or_before(df, "brent_close", latest_dt)
+        log(
+            f"Testing {len(candidate_dates)} recent Brent trading rows for "
+            f"Crude level stability; newest={latest_dt.date()}, "
+            f"reference Brent={latest_ref}"
+        )
+
+    for item in model_items:
+        missing_cols = [f for f in item["features"] if f not in df.columns]
+        log(
+            f"Crude level t+{int(item['horizon'])}: "
+            f"required_features={len(item['features'])}, "
+            f"missing_columns={len(missing_cols)}"
+        )
+        if missing_cols:
+            log(
+                f"Crude level t+{int(item['horizon'])} first missing columns: "
+                f"{missing_cols[:10]}"
+            )
 
     last_failure = None
 
@@ -969,9 +1191,10 @@ def build_predictions_for_commodity(commodity: str) -> dict[int, dict]:
             "data_source": unit_source_text(commodity),
         }
 
-    # Real Crude fix V12:
-    # Predict all Crude level horizons from one coherent/latest valid feature row.
-    # This prevents t+5/t+20 tree models from using a partially broken latest row.
+    # Real Crude fix V13:
+    # Crude LEVEL data is first rebuilt with the exact Yahoo/yfinance source and
+    # Brent-date alignment contract used during training. Predictions are then
+    # checked on one coherent/latest valid feature row before anything is posted.
     if commodity == "CRUDE":
         crude_level_rows = reg[reg["task"] == "level"].copy()
         crude_model_items: list[dict] = []
